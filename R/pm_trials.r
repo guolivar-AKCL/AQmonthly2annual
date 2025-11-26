@@ -29,9 +29,12 @@ auckland_avg <- all.data.long |>
 # Bind the new rows to the original dataframe
 all.data.long <- bind_rows(all.data.long, auckland_avg)
 
+# Which PM metric are we looking at?
+pm <- "pm10"
+pm_label <- "PM10"
 # Let's see the relationship between the May-August average and the annual average for no2 at all sites from 2015 onwards
-no2_data <- all.data.long |>
-  filter(Parameter == "no2") |>
+pm_data <- all.data.long |>
+  filter(Parameter == pm) |>
   mutate(
     year = year(date),
     month = month(date)
@@ -47,24 +50,61 @@ no2_data <- all.data.long |>
   filter(year >= 2015)
 # Scatter plot of may-august avg vs annual avg
 # Linear model to quantify the relationship
-lm_model <- lm(annual_avg ~ may_aug_avg + 0, data = no2_data)
+lm_model <- lm(annual_avg ~ may_aug_avg, data = pm_data)
 summary(lm_model)
-ggplot(no2_data, aes(x = may_aug_avg, y = annual_avg, colour = site)) +
-  geom_point() +
-  geom_smooth(
-    method = "lm",
-    formula = y ~ x + 0, se = TRUE,
-    color = "blue"
-  ) +
-  labs(
-    title = "Relationship between May-August Average and Annual Average of NO2",
-    x = "May-August Average NO2 (µg/m³)",
-    y = "Annual Average NO2 (µg/m³)",
-    subtitle = sprintf("[Annual] = %.3f * [May-August]", coef(lm_model)[1])
-  ) +
-  theme_minimal()
+# Plot with regression line, confidence interval, and equation in subtitle.
+# One plot per site in a single figure
+sites <- unique(pm_data$site)
+n_sites <- length(sites)
+par(mfrow = c(ceiling(n_sites / 3), 3), mar = c(4, 4, 3, 1))
 
-ggplot(no2_data) +
+for (site_name in sites) {
+  site_data <- pm_data %>% filter(site == site_name)
+  lm_site <- lm(annual_avg ~ may_aug_avg, data = site_data)
+
+  plot(
+    site_data$may_aug_avg,
+    site_data$annual_avg,
+    main = site_name,
+    xlab = paste("May-August Average", pm_label, "(µg/m³)"),
+    ylab = paste("Annual Average", pm_label, "(µg/m³)"),
+    pch = 16,
+    col = "steelblue"
+  )
+
+  # Add regression line with confidence interval
+  x_range <- range(site_data$may_aug_avg, na.rm = TRUE)
+  x_new <- seq(x_range[1], x_range[2], length.out = 100)
+  pred <- predict(lm_site, newdata = data.frame(may_aug_avg = x_new), se.fit = TRUE)
+
+  # Add confidence interval (shaded region)
+  polygon(
+    c(x_new, rev(x_new)),
+    c(pred$fit + 1.96 * pred$se.fit, rev(pred$fit - 1.96 * pred$se.fit)),
+    col = rgb(0, 0, 1, 0.1),
+    border = NA
+  )
+
+  # Add regression line
+  lines(x_new, pred$fit, col = "blue", lwd = 2)
+
+  # Extract coefficients for equation
+  intercept <- coef(lm_site)[1]
+  slope <- coef(lm_site)[2]
+  r_squared <- summary(lm_site)$r.squared
+
+  # Add equation in subtitle
+  equation <- sprintf(
+    "[Annual] = %.3f + %.3f * [May-Aug], R² = %.3f",
+    intercept, slope, r_squared
+  )
+  mtext(equation, side = 3, line = 0.5, cex = 0.85)
+}
+
+par(mfrow = c(1, 1))
+
+
+ggplot(pm_data) +
   geom_point(aes(x = jan_apr_avg, y = annual_avg, colour = "Jan - Apr")) +
   geom_point(aes(x = may_aug_avg, y = annual_avg, colour = "May - Aug")) +
   geom_point(aes(x = sep_dec_avg, y = annual_avg, colour = "Sep - Dec")) +
@@ -73,8 +113,8 @@ ggsave("./output/no2_may_aug_vs_annual.png", width = 8, height = 6)
 
 
 # Now let's look at all months individually and their relationship with the annual average
-no2_monthly <- all.data.long |>
-  filter(Parameter == "no2") |>
+pm_monthly <- all.data.long |>
+  filter(Parameter == pm) |>
   mutate(
     year = year(date),
     month = month(date)
@@ -87,13 +127,13 @@ no2_monthly <- all.data.long |>
   filter(year >= 2015)
 
 # Add annual average to this dataframe
-no2_monthly <- no2_monthly |>
+pm_monthly <- pm_monthly |>
   left_join(
-    no2_data |> select(site, year, annual_avg),
+    pm_data |> select(site, year, annual_avg),
     by = c("site", "year")
   )
 # Add season labels Jan-Apr, May-Aug, Sep-Dec
-no2_monthly <- no2_monthly |>
+pm_monthly <- pm_monthly |>
   mutate(
     season = case_when(
       month %in% 1:4 ~ "Jan-Apr",
@@ -103,7 +143,7 @@ no2_monthly <- no2_monthly |>
   )
 
 # Plot with colours for each season
-ggplot(no2_monthly, aes(x = monthly_avg, y = annual_avg, colour = season)) +
+ggplot(pm_monthly, aes(x = monthly_avg, y = annual_avg, colour = season)) +
   geom_point() +
   geom_smooth(
     method = "lm",
@@ -112,14 +152,14 @@ ggplot(no2_monthly, aes(x = monthly_avg, y = annual_avg, colour = season)) +
   ) +
   labs(
     title = "Relationship between Monthly Average and Annual Average of NO2",
-    x = "Monthly Average NO2 (µg/m³)",
-    y = "Annual Average NO2 (µg/m³)",
+    x = paste("Monthly Average", pm_label, "(µg/m³)"),
+    y = paste("Annual Average", pm_label, "(µg/m³)"),
     colour = "Season"
   ) +
   theme_minimal()
 
 # Plot with colours for each month
-ggplot(no2_monthly, aes(x = monthly_avg, y = annual_avg, colour = factor(month))) +
+ggplot(pm_monthly, aes(x = monthly_avg, y = annual_avg, colour = factor(month))) +
   geom_point() +
   geom_smooth(
     method = "lm",
@@ -128,13 +168,13 @@ ggplot(no2_monthly, aes(x = monthly_avg, y = annual_avg, colour = factor(month))
   ) +
   labs(
     title = "Relationship between Monthly Average and Annual Average of NO2",
-    x = "Monthly Average NO2 (µg/m³)",
-    y = "Annual Average NO2 (µg/m³)",
+    x = paste("Monthly Average", pm_label, "(µg/m³)"),
+    y = paste("Annual Average", pm_label, "(µg/m³)"),
     colour = "Month"
   ) +
   theme_minimal()
 
 
-summary(lm(annual_avg ~ jan_apr_avg + 0, data = no2_data))
-summary(lm(annual_avg ~ may_aug_avg + 0, data = no2_data))
-summary(lm(annual_avg ~ sep_dec_avg + 0, data = no2_data))
+summary(lm(annual_avg ~ jan_apr_avg + 0, data = pm_data))
+summary(lm(annual_avg ~ may_aug_avg + 0, data = pm_data))
+summary(lm(annual_avg ~ sep_dec_avg + 0, data = pm_data))
