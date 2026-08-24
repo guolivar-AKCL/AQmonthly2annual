@@ -110,3 +110,123 @@ load_or_install <- function(pkg) {
   }
 }
 # ============================================================================
+
+# ============================================================================
+# Monthly-to-annual scaling factor helpers
+# ============================================================================
+
+#' Enumerate consecutive month windows
+#'
+#' @param max_window Longest window to generate, in months.
+#' @return A named list; each element is an integer vector of month numbers and
+#'   the name is the window label (e.g. "May-Aug").
+month_windows <- function(max_window = 6) {
+  windows <- list()
+  for (n in seq_len(max_window)) {
+    for (start in seq_len(13 - n)) {
+      months <- start:(start + n - 1)
+      windows[[window_label(months)]] <- months
+    }
+  }
+  windows
+}
+
+#' Short human-readable label for a set of months
+#'
+#' @param months Integer vector of month numbers.
+#' @return A single string, e.g. "Jun" or "May-Aug".
+window_label <- function(months) {
+  abb <- month.abb[months]
+  if (length(months) == 1) abb else paste0(abb[1], "-", abb[length(abb)])
+}
+
+#' Fit a through-origin scaling factor with leave-one-out error metrics
+#'
+#' Fits `annual = factor * sampled` (no intercept), which is the form used to
+#' scale a campaign result up to an annual mean. Errors are reported both for
+#' the fitted model and leave-one-out, the latter being the honest estimate of
+#' how the factor performs on a year it was not fitted on.
+#'
+#' @param sampled Numeric vector of window means.
+#' @param annual Numeric vector of matching annual means.
+#' @return A one-row data frame of coefficients and error metrics.
+fit_scaling_factor <- function(sampled, annual) {
+  sxx <- sum(sampled^2)
+  sxy <- sum(sampled * annual)
+  factor <- sxy / sxx
+
+  fitted <- factor * sampled
+  resid <- annual - fitted
+  # Standard error of a through-origin slope, n - 1 degrees of freedom
+  se <- sqrt(sum(resid^2) / (length(sampled) - 1) / sxx)
+
+  # Leave-one-out: refit the factor without each year in turn
+  loo_factor <- (sxy - sampled * annual) / (sxx - sampled^2)
+  loo_resid <- annual - loo_factor * sampled
+
+  data.frame(
+    factor = factor,
+    factor_se = se,
+    factor_lwr = factor - 1.96 * se,
+    factor_upr = factor + 1.96 * se,
+    rmse = sqrt(mean(resid^2)),
+    pct_mae = mean(abs(resid) / annual) * 100,
+    loo_rmse = sqrt(mean(loo_resid^2)),
+    loo_pct_mae = mean(abs(loo_resid) / annual) * 100,
+    loo_pct_max = max(abs(loo_resid) / annual) * 100,
+    stringsAsFactors = FALSE
+  )
+}
+
+#' Fit the two-parameter regression alternative to a scaling factor
+#'
+#' @param sampled Numeric vector of window means.
+#' @param annual Numeric vector of matching annual means.
+#' @return A one-row data frame with intercept, slope, R-squared and
+#'   leave-one-out percentage error.
+fit_linear_model <- function(sampled, annual) {
+  model <- lm(annual ~ sampled)
+  coefs <- coef(model)
+  # Leave-one-out residuals from the hat values, no refitting needed
+  h <- stats::hatvalues(model)
+  loo_resid <- stats::residuals(model) / (1 - h)
+
+  data.frame(
+    lm_intercept = unname(coefs[1]),
+    lm_slope = unname(coefs[2]),
+    lm_r_squared = summary(model)$r.squared,
+    lm_loo_pct_mae = mean(abs(loo_resid) / annual) * 100,
+    stringsAsFactors = FALSE
+  )
+}
+
+#' Leave-one-site-out error for a pooled scaling factor
+#'
+#' Refits the pooled factor with one site held out and applies it to that
+#' site's years, repeated for every site. This is the error to quote when the
+#' factor is applied at a location that contributed nothing to fitting it.
+#'
+#' @param data Data frame with `site`, `sampled_mean` and `annual_mean`.
+#' @return A one-row data frame with the mean and maximum percentage error and
+#'   the number of sites tested.
+loso_error <- function(data) {
+  sites <- unique(data$site)
+  if (length(sites) < 2) {
+    return(data.frame(loso_pct_mae = NA_real_, loso_pct_max = NA_real_, loso_n_sites = length(sites)))
+  }
+
+  errors <- unlist(lapply(sites, function(s) {
+    held_out <- data[data$site == s, ]
+    rest <- data[data$site != s, ]
+    if (nrow(rest) < 2) return(numeric(0))
+    factor <- sum(rest$sampled_mean * rest$annual_mean) / sum(rest$sampled_mean^2)
+    abs(factor * held_out$sampled_mean - held_out$annual_mean) / held_out$annual_mean * 100
+  }))
+
+  data.frame(
+    loso_pct_mae = mean(errors),
+    loso_pct_max = max(errors),
+    loso_n_sites = length(sites),
+    stringsAsFactors = FALSE
+  )
+}

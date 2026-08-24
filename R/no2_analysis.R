@@ -1,5 +1,5 @@
 # ============================================================================
-# NO2 Sampling Analysis: Find optimal sampling months for annual estimates
+# Sampling Analysis: Find optimal sampling months for annual estimates
 #
 # This script evaluates different month combinations to identify which sampling
 # periods best estimate the true annual average, using linear regression
@@ -20,12 +20,12 @@ library(lubridate)
 load("./data/aq_data_SOE2025.RData")
 
 # Configuration
-METRIC <- "no2"
+METRIC <- "pm2.5"
 START_YEAR <- 2015
 MAX_MONTHS <- 4 # Maximum consecutive months to test
 
 # ============================================================================
-# Data Preparation: Create site aggregates and filter to analysis period
+# Data Preparation: Create city aggregate
 # ============================================================================
 
 # Create city-wide average by aggregating across all sites
@@ -49,7 +49,7 @@ analyze_site_sampling <- function(site_data, site_name, max_months) {
     return(data.frame())
   }
 
-  # Calculate monthly and annual averages once (avoid recalculation)
+  # Calculate monthly and annual averages once
   monthly_stats <- site_data |>
     mutate(month = month(date), year = year(date)) |>
     group_by(year, month) |>
@@ -155,7 +155,7 @@ results_df <- bind_rows(results_list) |>
 
 write.csv(
   results_df,
-  paste0("./output/no2_sampling_analysis_results_starting_", START_YEAR, ".csv"),
+  paste0("./output/pm2.5_sampling_analysis_results_starting_", START_YEAR, ".csv"),
   row.names = FALSE
 )
 
