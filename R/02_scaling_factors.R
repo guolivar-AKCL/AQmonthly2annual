@@ -36,22 +36,8 @@ windows <- month_windows(MAX_WINDOW)
 # incomplete, so a factor is never fitted on a partly-missing window.
 # ============================================================================
 
-calendar_pairs <- map_df(names(windows), function(label) {
-  months <- windows[[label]]
-
-  monthly_complete |>
-    filter(month %in% months) |>
-    group_by(Parameter, site, year) |>
-    summarise(sampled_mean = mean(monthly_mean), n_used = n(), .groups = "drop") |>
-    filter(n_used == length(months)) |>
-    mutate(window = label, n_months = length(months))
-}) |>
-  inner_join(annual, by = c("Parameter", "site", "year")) |>
-  transmute(
-    Parameter, site, year, window, n_months,
-    target = "calendar", wraps = FALSE,
-    sampled_mean, target_mean = annual_mean
-  )
+calendar_pairs <- calendar_window_pairs(monthly_complete, annual, windows) |>
+  mutate(target = "calendar", wraps = FALSE)
 
 # ============================================================================
 # Rolling twelve-month target
@@ -139,6 +125,7 @@ factors <- bind_rows(site_factors, pooled_factors) |>
     metric = Parameter, target, site, window, n_months, wraps,
     n_years, first_year, last_year,
     factor, factor_se, factor_lwr, factor_upr,
+    ratio_factor, ratio_factor_se, ratio_loo_pct_mae,
     rmse, pct_mae, loo_rmse, loo_pct_mae, loo_pct_max, rank_loo,
     loso_pct_mae, loso_pct_max, loso_n_sites,
     lm_intercept, lm_slope, lm_r_squared, lm_loo_pct_mae

@@ -1,0 +1,613 @@
+---
+title: "Monthly-to-annual scaling factors: methods and validation"
+subtitle: "Companion to *Scaling short-term air quality measurements to annual means*"
+author: "Gustavo Olivares, Auckland Council"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    number_sections: true
+    df_print: kable
+    theme: flatly
+---
+
+```{r setup, include = FALSE}
+knitr::opts_knit$set(root.dir = normalizePath(".."))
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+```
+
+```{r load}
+source("R/00_config.R")
+library(dplyr)
+library(knitr)
+
+factors <- read.csv(SCALING_FACTORS)
+monthly <- read.csv(MONTHLY_MEANS)
+annual <- read.csv(ANNUAL_MEANS)
+pairs <- read.csv("output/window_year_pairs.csv")
+sensitivity <- read.csv("output/sensitivity.csv")
+estimators <- read.csv("output/estimator_comparison.csv")
+residuals_df <- read.csv("output/residuals.csv")
+diagnostics <- read.csv("output/residual_diagnostics.csv")
+
+pooled <- factors |> filter(site == "pooled", target == "calendar")
+prep <- read.csv("output/prep_summary.csv")
+label_metric <- function(x) unname(METRIC_LABELS[x])
+metric_order <- function(x) match(label_metric(x), unname(METRIC_LABELS))
+
+# Mean leave-one-out error of each estimator, and which pollutants each wins
+est_mean <- estimators |>
+  group_by(metric, estimator) |>
+  summarise(loo = mean(loo_pct_mae), .groups = "drop")
+
+est_best <- est_mean |>
+  group_by(metric) |>
+  slice_min(loo, n = 1, with_ties = FALSE) |>
+  ungroup()
+
+wins <- function(name) {
+  m <- est_best$metric[est_best$estimator == name]
+  if (length(m) == 0) "none" else paste(label_metric(m), collapse = " and ")
+}
+
+beats_origin <- function(name) {
+  cmp <- est_mean |>
+    filter(estimator %in% c(name, "through-origin OLS")) |>
+    tidyr::pivot_wider(names_from = estimator, values_from = loo)
+  m <- cmp$metric[cmp[[name]] < cmp[["through-origin OLS"]]]
+  if (length(m) == 0) "no pollutant" else paste(label_metric(m), collapse = " and ")
+}
+```
+
+# Scope
+
+This document sets out the method behind the scaling factors published in
+*Scaling short-term air quality measurements to annual means* and the checks
+run against them. The main report states the results and how to use them; this
+one states how they were produced, what was assumed, and what happens to the
+answers when the assumptions are varied. It is written to be read alongside the
+code, which is the definitive statement of the method: every number in both
+documents is computed at knit time from the files in `output/`, which are in
+turn produced by the scripts named in section [Reproducibility](#reproducibility).
+
+# Notation
+
+| Symbol | Meaning |
+|--------|---------|
+| $s$ | A monitoring site, including the synthetic network average |
+| $p$ | A pollutant: PM2.5, PM10 or NO2 |
+| $y$ | A calendar year |
+| $m$ | A calendar month, $1 \dots 12$ |
+| $h_{spym}$ | The set of valid hourly measurements in month $m$ |
+| $M_{spym}$ | Monthly mean concentration |
+| $c_{spym}$ | Completeness of the month: measured hours divided by possible hours |
+| $W$ | A sampling window — a run of $n$ consecutive months |
+| $X$ | The sampled mean: the mean of the monthly means in $W$ |
+| $T$ | The target mean: a calendar-year or rolling twelve-month mean |
+| $f$ | The scaling factor, $T \approx f X$ |
+
+# Data preparation
+
+## Source
+
+Hourly measurements are taken from `data/aq_data_SOE2025.RData`, the compiled
+dataset behind *Ambient Air Quality in Auckland - trend analysis 2015 to 2024*
+(TR 2025/26). It holds one long-format table, `all.data.long`, with columns
+`Parameter`, `Value`, `date` and `site`. No re-derivation from raw instrument
+output is attempted: the analysis inherits the validation and ratification
+applied in producing that dataset. Timestamps are New Zealand local time,
+including daylight saving.
+
+## Duplicate timestamps
+
+A site and pollutant occasionally has two records for the same hour, where two
+instruments ran in parallel. These are averaged so that each hour contributes
+once to the monthly mean. This affects
+`r format(prep$n_duplicated, big.mark = ",")` records —
+`r sprintf("%.2f", prep$n_duplicated / prep$n_hourly_raw * 100)`% of the hourly
+records for these pollutants — concentrated
+in NO2 at henderson (2011), queen_st (2012, 2016) and penrose (2006), and PM2.5
+at pakuranga (2021) and takapuna (2023). The alternative, taking the first
+record, was rejected because the ordering of the source table does not encode
+which instrument is preferred.
+
+## Aggregation
+
+Concentrations are aggregated in two steps: hours to monthly means, then
+monthly means to the target. The annual mean is therefore the unweighted mean
+of twelve monthly means, not the mean of all hours in the year:
+
+$$M_{spym} = \frac{1}{|h_{spym}|}\sum_{t \in h_{spym}} v_t \qquad
+T^{\text{cal}}_{spy} = \frac{1}{12}\sum_{m=1}^{12} M_{spym}$$
+
+The two differ whenever data capture is uneven across the year: pooling hours
+lets a well-reported month pull the annual figure toward its own level, which
+in a seasonal signal means toward its own season. Averaging monthly means gives
+each month equal weight regardless of how many hours it contributed. Section
+[Sensitivity](#sensitivity) shows the choice makes almost no difference to the fitted
+factors, because the completeness rules already exclude the cases where it
+would.
+
+## Completeness rules
+
+Two thresholds are applied:
+
+- A **month** is usable if at least
+  `r sprintf("%.0f", MIN_MONTH_COMPLETENESS * 100)`% of its possible hours were
+  measured ($c_{spym} \geq `r MIN_MONTH_COMPLETENESS`$). Possible hours are
+  taken as days in month $\times$ 24, ignoring the one-hour daylight saving
+  shifts, which is a rounding of at most 0.15% of a month.
+- A **year** is usable only if all twelve of its months are usable. There is no
+  partial-year target.
+
+```{r completeness-table}
+monthly |>
+  group_by(Parameter) |>
+  summarise(
+    `Site-months` = n(),
+    `Excluded` = sum(!complete),
+    `Excluded (%)` = mean(!complete) * 100,
+    `Median completeness` = median(completeness) * 100,
+    .groups = "drop"
+  ) |>
+  mutate(Pollutant = label_metric(Parameter)) |>
+  arrange(metric_order(Parameter)) |>
+  select(Pollutant, everything(), -Parameter) |>
+  kable(digits = 1, caption = "Effect of the monthly completeness rule")
+```
+
+The `r sprintf("%.0f", MIN_MONTH_COMPLETENESS * 100)`% figure follows the data
+capture conventions usual in ambient monitoring rather than being derived from
+this dataset. Because it is a judgement, it is varied in section
+[Sensitivity](#sensitivity); the factors move by
+`r sensitivity |> filter(variant == "completeness 50%") |> pull(pct_factor_shift) |> abs() |> median() |> sprintf(fmt = "%.1f")`%
+(median) when it is relaxed to 50% and
+`r sensitivity |> filter(variant == "completeness 90%") |> pull(pct_factor_shift) |> abs() |> median() |> sprintf(fmt = "%.1f")`%
+when it is tightened to 90%.
+
+The rule is deliberately strict about the *target*: an annual mean built from
+ten months is not the quantity a campaign is trying to estimate, and admitting
+one would put error into the thing the error is measured against. The price is
+paid in sample size, most heavily for PM2.5.
+
+```{r site-years}
+annual |>
+  filter(site != CITY_SITE) |>
+  count(Parameter, name = "site_years") |>
+  mutate(
+    Pollutant = label_metric(Parameter),
+    `Complete site-years` = site_years,
+    `Of a possible` = (END_YEAR - START_YEAR + 1) *
+      sapply(Parameter, function(p) {
+        monthly |> filter(Parameter == p, site != CITY_SITE) |>
+          distinct(site) |> nrow()
+      })
+  ) |>
+  mutate(`Retained (%)` = `Complete site-years` / `Of a possible` * 100) |>
+  arrange(metric_order(Parameter)) |>
+  select(Pollutant, `Complete site-years`, `Of a possible`, `Retained (%)`) |>
+  kable(digits = 0, caption = "Site-years surviving the completeness rules")
+```
+
+## The network-average series
+
+A synthetic site, `auckland`, is formed as the mean across all sites reporting
+each hour, and carried through the analysis as an extra site. It represents the
+network average rather than any location, and its composition changes as sites
+enter and leave the record, so:
+
+- it is **excluded from the pooled fits**, where it would double-count the sites
+  it is made from;
+- it is **excluded from the leave-one-site-out test**, for the same reason;
+- it is reported as its own row in `output/scaling_factors.csv` for readers who
+  want a network-wide figure.
+
+# Targets
+
+## Calendar year
+
+The primary target. The window sits inside the calendar year it is compared
+with, which is the year most reporting is expressed in.
+
+## Rolling twelve months
+
+$$T^{\text{roll}}_{sp,y,m} = \frac{1}{12}\sum_{k=0}^{11} M_{sp,(y,m)+k}$$
+
+where $(y,m)+k$ is the month $k$ months after $(y, m)$, crossing into the
+following calendar year as needed. All twelve months must be complete. This is
+the target for campaigns that cross the end of a year, and it is anchored at the
+window's first month, so the campaign sits at the *front* of the period it
+estimates.
+
+Two consequences a reader should hold onto:
+
+1. A rolling-target estimate is not a calendar-year figure and must not be
+   reported as one.
+2. Anchoring at the front is a choice. A target centred on the campaign would
+   probably score better for late-year windows, and was not fitted because a
+   period beginning six months before the campaign is rarely the quantity a
+   study wants. This is the most questionable of the choices documented here.
+
+## Independence of successive targets
+
+Rolling twelve-month periods overlap, which would ordinarily make the fitted
+years dependent. They do not here: a factor is fitted for a fixed window, hence
+a fixed start month, so the years entering one fit are anchored twelve months
+apart and their targets do not share a single month. The same is true of
+calendar years by construction. Cross-year dependence is tested directly in
+section [Assumptions and diagnostics](#residual-diagnostics).
+
+# Windows
+
+A window is a run of $n$ consecutive months, $n = 1 \dots `r MAX_WINDOW`$.
+Against the calendar-year target the run must lie within one year, giving
+$\sum_{n=1}^{`r MAX_WINDOW`}(13-n) = `r nrow(distinct(pooled, window))`$
+windows. Against the rolling target it may start in any month, giving
+$12 \times `r MAX_WINDOW` = `r 12 * MAX_WINDOW`$, of which
+`r factors |> filter(site == "pooled", target == "rolling") |> distinct(window, wraps) |> filter(wraps) |> nrow()`
+cross the end of a year.
+
+Only consecutive months are considered. A campaign is a continuous deployment,
+so a disjoint set of months — sampling February and August but not the months
+between — is not something a single campaign can deliver, and admitting such
+sets would multiply the search space to the point where the best window would
+be selected on noise.
+
+The window mean $X$ is the unweighted mean of the $n$ monthly means, and the
+window is dropped for a year if any of its months is incomplete. A campaign
+that does not run the full window is not the window that was fitted.
+
+# The estimator
+
+## Definition
+
+For each pollutant, site (or the pool), window and target, the scaling factor
+is the through-origin least squares coefficient across years:
+
+$$\hat{f} = \frac{\sum_i X_i T_i}{\sum_i X_i^2}, \qquad
+\widehat{\operatorname{se}}(\hat f) =
+\sqrt{\frac{\sum_i (T_i - \hat f X_i)^2}{(n-1)\sum_i X_i^2}}$$
+
+with $i$ indexing the years (and, in a pooled fit, the site-years) available
+for that combination. Confidence intervals are reported as
+$\hat f \pm 1.96\,\widehat{\operatorname{se}}$; section
+[Assumptions and diagnostics](#residual-diagnostics) qualifies the normal approximation behind that.
+
+A minimum of `r MIN_YEARS` years is required before a factor is fitted.
+
+## Why a single multiplier
+
+Three properties recommend it:
+
+- **It is what a campaign can apply.** One number, applied to one measured
+  mean. A two-parameter form requires the intercept to hold at a location whose
+  concentration level may be nothing like the fitting data's.
+- **It matches the error structure.** Absolute errors grow with concentration
+  (section [Assumptions and diagnostics](#residual-diagnostics)), so a multiplicative correction is the
+  natural form; a fixed additive offset is not.
+- **It is scale-free.** The factor for a window is a property of the seasonal
+  shape, not of the level, which is what makes it transportable to a site with
+  a different mean concentration.
+
+## Alternatives considered {#estimators}
+
+Four estimators were fitted on identical data and scored by the same
+leave-one-out procedure.
+
+```{r estimator-table}
+est_mean |>
+  arrange(metric_order(metric)) |>
+  mutate(Pollutant = label_metric(metric)) |>
+  select(Pollutant, estimator, loo) |>
+  tidyr::pivot_wider(names_from = estimator, values_from = loo) |>
+  kable(
+    digits = 2,
+    caption = "Mean leave-one-out error (%) over all windows, by estimator"
+  )
+```
+
+```{r estimator-wins}
+estimators |>
+  group_by(metric, window) |>
+  slice_min(loo_pct_mae, n = 1, with_ties = FALSE) |>
+  ungroup() |>
+  count(metric, estimator) |>
+  mutate(Pollutant = label_metric(metric)) |>
+  arrange(metric_order(metric), desc(n)) |>
+  select(Pollutant, Estimator = estimator, `Windows won` = n) |>
+  kable(caption = "Which estimator scores best, window by window")
+```
+
+The definitions, with $r_i = T_i / X_i$:
+
+| Estimator | Formula | Note |
+|-----------|---------|------|
+| Through-origin OLS | $\sum X_i T_i / \sum X_i^2$ | The published `factor`. Minimises squared *absolute* error, so high-concentration years dominate |
+| Ratio of means | $\sum T_i / \sum X_i$ | Same weighting, marginally different fit |
+| Mean of ratios | $\frac{1}{n}\sum r_i$ | Every year weighted equally. Published alongside as `ratio_factor` |
+| OLS with intercept | $T = a + bX$ | Two parameters, not a scaling factor |
+
+**This comparison does not unambiguously favour the published estimator, and
+that should be stated plainly.** Judged on mean leave-one-out percentage error,
+the two-parameter model is the best of the four for `r wins("OLS with intercept")`,
+and mean-of-ratios beats through-origin OLS for `r beats_origin("mean of ratios")`.
+The reason is visible in the weighting column: through-origin OLS minimises
+absolute error while the score is a percentage, so it is not the estimator that
+optimises the quantity being reported.
+
+The differences are modest — between the three single-factor estimators the
+factor itself differs by a median of
+`r estimators |> filter(!is.na(factor)) |> group_by(metric, window) |> summarise(d = max(factor) - min(factor), .groups = "drop") |> pull(d) |> median() |> sprintf(fmt = "%.3f")`
+— and the through-origin factor is published as the headline for the three
+properties in the previous section. But a user optimising for percentage
+accuracy at a known site should prefer `ratio_factor`, and one with a long local
+record and a concentration level close to the fitting data may do better still
+with the two-parameter fit. All three are in `output/scaling_factors.csv`.
+
+# Validation
+
+## Why the fitted error is not quoted
+
+The residuals of a fitted model understate the error on data the model has not
+seen, the more so the fewer years are in the fit. Across the pooled fits the
+fitted percentage error averages
+`r sprintf("%.1f", mean(pooled$pct_mae))`% against
+`r sprintf("%.1f", mean(pooled$loo_pct_mae))`% leave-one-out, an understatement
+of `r sprintf("%.0f", (1 - mean(pooled$pct_mae) / mean(pooled$loo_pct_mae)) * 100)`%.
+Only out-of-sample figures are quoted in the main report.
+
+## Leave-one-out across years
+
+Each year in turn is held out, the factor refitted on the rest, and the held-out
+year predicted. For the through-origin estimator this has a closed form, so no
+refitting loop is needed:
+
+$$\hat f_{(-k)} = \frac{\sum_i X_i T_i - X_k T_k}{\sum_i X_i^2 - X_k^2},
+\qquad e_k = T_k - \hat f_{(-k)} X_k$$
+
+and for the two-parameter model the leave-one-out residuals come from the hat
+values, $e_{(-k)} = e_k / (1 - h_k)$.
+
+## Leave-one-site-out
+
+The relevant test for a factor used somewhere it was not fitted. Each site is
+removed from the pool entirely, the pooled factor refitted on the remaining
+sites, and every year of the held-out site predicted from it. Reported as
+`loso_pct_mae` (mean) and `loso_pct_max` (worst single site-year).
+
+## Error metrics
+
+With $e_i$ the relevant residual and $n$ the number of site-years:
+
+| Metric | Definition |
+|--------|------------|
+| `rmse`, `loo_rmse` | $\sqrt{\frac{1}{n}\sum e_i^2}$, in µg/m³ |
+| `pct_mae`, `loo_pct_mae`, `loso_pct_mae` | $\frac{100}{n}\sum |e_i| / T_i$ |
+| `loo_pct_max`, `loso_pct_max` | $100 \max_i |e_i| / T_i$ |
+| `lm_r_squared` | Coefficient of determination of the two-parameter fit |
+
+Percentage errors are taken relative to the target, not the estimate, so they
+answer "how far from the true annual mean is this estimate" rather than the
+reverse.
+
+# Uncertainty for a new campaign
+
+A campaign measures $X$ once and reports $\hat T = \hat f X$. Two sources of
+error contribute:
+
+1. Uncertainty in the factor itself, $\operatorname{se}(\hat f) \cdot X$. This
+   is small — the confidence intervals in the main report span a few per cent —
+   and shrinks as the fitting record grows.
+2. The year-to-year scatter around the factor, which does not shrink: a given
+   year simply may not follow the average seasonal shape.
+
+The second dominates, and it is what `loo_pct_mae` and `loso_pct_mae` measure.
+The recommended interval for a campaign estimate is therefore empirical rather
+than analytic: take the leave-one-out (own site) or leave-one-site-out (new
+site) percentage error for that window and read
+
+$$\hat T \pm \text{loo\_pct\_mae} \times \hat T / 100$$
+
+as a typical band, and `loo_pct_max` as the worst case seen in the record. The
+residuals are not normal enough (section [Assumptions and diagnostics](#residual-diagnostics)) to make a
+$\pm 1.96\sigma$ interval trustworthy in the tails, and quoting the factor's own
+confidence interval alone would understate the true uncertainty by an order of
+magnitude.
+
+# Assumptions and diagnostics {#residual-diagnostics}
+
+The method assumes: the seasonal shape at a site is stable across years; the
+relationship between window mean and annual mean passes through the origin;
+residuals are of roughly constant *relative* size; and successive years are
+independent. Each is tested below on the pooled calendar-target fits.
+
+```{r diagnostics-table}
+diagnostics |>
+  group_by(metric) |>
+  summarise(
+    `Windows` = n(),
+    `cor(|resid|, level)` = median(scale_corr),
+    `cor(|rel resid|, level)` = median(rel_scale_corr),
+    `Mean rel. residual (%)` = median(mean_rel),
+    `Skewness` = median(skewness),
+    `Non-normal (% of windows)` = mean(shapiro_p < 0.05, na.rm = TRUE) * 100,
+    `Within-site lag-1` = median(mean_lag1, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  mutate(Pollutant = label_metric(metric)) |>
+  arrange(metric_order(metric)) |>
+  select(Pollutant, everything(), -metric) |>
+  kable(digits = 2, caption = "Residual diagnostics, median across windows")
+```
+
+**Constant relative error — supported.** Absolute residuals grow with
+concentration for NO2 (Spearman
+`r sprintf("%.2f", diagnostics |> filter(metric == "no2") |> pull(scale_corr) |> median())`),
+which is exactly the case an additive correction handles badly. Expressed
+relative to the level, that correlation disappears or turns slightly negative in
+every pollutant. This is the central justification for a multiplicative factor.
+
+**Independence across years — supported.** Within-site lag-1 autocorrelation of
+the residuals is near zero or negative in all three pollutants, so there is no
+sign that a site's error in one year carries into the next. The leave-one-out
+scores are not inflated by dependence.
+
+**Normality — not supported, and it matters.** Residuals from the pooled fits
+fail a Shapiro-Wilk test in
+`r sprintf("%.0f", diagnostics |> filter(metric == "no2") |> summarise(x = mean(shapiro_p < 0.05, na.rm = TRUE) * 100) |> pull(x))`%
+of NO2 windows, with positive skew. Pooled fits mix sites of different
+character, so this is expected rather than alarming, but it means the
+$\pm 1.96\,\operatorname{se}$ confidence intervals on the factors are
+approximate, and it is why section 8 recommends empirical error bands rather
+than normal-theory prediction intervals.
+
+**Zero intercept — approximately true, and the residual bias is reported.** The
+mean relative residual is
+`r sprintf("%.1f", median(abs(diagnostics$mean_rel)))`% or less in every
+pollutant. It is not exactly zero because through-origin OLS sets the *absolute*
+residuals to be orthogonal to $X$, not the relative ones — the same asymmetry
+that shows up in the estimator comparison.
+
+**Stable seasonal shape — the weakest assumption.** Section
+[Sensitivity](#sensitivity) shows factors fitted on the two halves of the record differ
+by a median of
+`r sensitivity |> filter(grepl("^period 20(15-2019|20-2024)$", variant)) |> pull(pct_factor_shift) |> abs() |> median() |> sprintf(fmt = "%.1f")`%,
+with individual windows moving several times that. The factors describe the
+decade averaged, and a campaign in an unusual year is not protected by them.
+
+# Sensitivity {#sensitivity}
+
+Every judgement in the method was varied and the pooled factors refitted from
+the raw data. The table reports how far the factors move, as a percentage of
+the published value.
+
+```{r sensitivity-table}
+sensitivity |>
+  filter(variant != "base") |>
+  group_by(variant) |>
+  summarise(
+    `Windows` = n(),
+    `Median shift (%)` = median(abs(pct_factor_shift)),
+    `90th percentile (%)` = quantile(abs(pct_factor_shift), 0.9),
+    `Largest shift (%)` = max(abs(pct_factor_shift)),
+    `Median error change (pp)` = median(loo_shift, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  rename(Variant = variant) |>
+  kable(digits = 2, caption = "Sensitivity of the pooled factors to the method's choices")
+```
+
+Reading the table:
+
+- **Completeness threshold.** Relaxing to 50% or tightening to 90% moves the
+  factors by under 2% at the median. The rule is not doing hidden work.
+- **Annual mean definition.** Weighting months by hours measured, instead of
+  equally, changes the factors by
+  `r sensitivity |> filter(variant == "hour-weighted annual mean") |> pull(pct_factor_shift) |> abs() |> median() |> sprintf(fmt = "%.2f")`%
+  at the median. The completeness rules leave too little uneven capture for the
+  choice to matter.
+- **Period.** Extending back to `r 2006` or splitting the decade in half moves
+  factors by 1.6-2.3% at the median and up to
+  `r sensitivity |> filter(grepl("^period", variant)) |> pull(pct_factor_shift) |> abs() |> max() |> sprintf(fmt = "%.0f")`%
+  for individual windows. This is the largest sensitivity in the analysis and
+  the honest limit on the factors' shelf life: they should be refitted when the
+  record extends materially.
+
+```{r rank-stability}
+# sensitivity.csv already carries the reference fit as base_factor/base_loo
+rank_stability <- sensitivity |>
+  filter(variant != "base") |>
+  group_by(variant, metric) |>
+  summarise(rho = cor(loo_pct_mae, base_loo, method = "spearman"), .groups = "drop")
+
+best_four <- sensitivity |>
+  filter(n_months == 4) |>
+  group_by(metric, variant) |>
+  slice_min(loo_pct_mae, n = 1, with_ties = FALSE) |>
+  ungroup() |>
+  group_by(metric) |>
+  summarise(windows = paste(sort(unique(window)), collapse = ", "), .groups = "drop")
+```
+
+**How stable is the ranking?** The ordering of windows by error is largely
+preserved: the Spearman correlation with the published ordering runs from
+`r sprintf("%.2f", min(rank_stability$rho))` to
+`r sprintf("%.2f", max(rank_stability$rho))`
+(median `r sprintf("%.2f", median(rank_stability$rho))`), the low end being the
+five-year subperiods, which have half the data.
+
+The *single best* window is not equally stable, and the difference is
+instructive:
+
+```{r best-window-stability}
+best_four |>
+  mutate(Pollutant = label_metric(metric)) |>
+  arrange(metric_order(metric)) |>
+  select(Pollutant, `Best four-month window across all variants` = windows) |>
+  kable(caption = "Windows that come top under at least one variant")
+```
+
+For NO2 the recommendation survives every variant of the method except the
+five-year subperiods, which prefer the neighbouring Jun-Sep. For PM2.5 the top
+four-month window moves between Mar-Jun, Aug-Nov and Jul-Oct depending on the
+variant — but Mar-Jun and Aug-Nov differ by
+`r sprintf("%.1f", abs(diff(sensitivity |> filter(variant == "base", metric == "pm2.5", window %in% c("Mar-Jun", "Aug-Nov")) |> pull(loo_pct_mae))))`
+percentage points in the published fit, so the two are not meaningfully
+separable on this record and the choice between them should not be read as a
+finding. This is the thin PM2.5 record showing through, and it is the reason the
+main report presents a table of windows rather than a single recommendation.
+
+# Limitations
+
+- **PM2.5 is thinly supported.**
+  `r annual |> filter(Parameter == "pm2.5", site != CITY_SITE) |> nrow()`
+  complete site-years across
+  `r annual |> filter(Parameter == "pm2.5", site != CITY_SITE) |> distinct(site) |> nrow()`
+  sites, only
+  `r factors |> filter(metric == "pm2.5", site != "pooled", site != CITY_SITE) |> distinct(site) |> nrow()`
+  of which has enough years for a site-specific factor.
+- **The published estimator is not the best-scoring one** (section
+  [Alternatives considered](#estimators)). It is the most portable; the alternatives are supplied.
+- **The rolling target is anchored at the campaign start**, not centred on it.
+- **Site type is not modelled.** Sites are pooled without a covariate for
+  kerbside, urban or rural character, even though the main report shows that
+  character drives the residual spread. A mixed model with a site-type term
+  would very likely tighten the transfer error; it is the obvious next step and
+  was not attempted here.
+- **These are Auckland factors**, encoding Auckland's seasonal cycle, emission
+  mix and climate.
+- **No measurement-uncertainty term.** The analysis treats the reported hourly
+  concentrations as exact.
+- **Reference-grade instruments only.** Applying a factor to a campaign run on
+  a different measurement method assumes that method has already been corrected
+  for its own bias.
+
+# Reproducibility {#reproducibility}
+
+```
+Rscript R/01_prepare_data.R      # monthly, annual and rolling means
+Rscript R/02_scaling_factors.R   # fit the factors
+Rscript R/03_figures.R           # report figures
+Rscript R/04_method_checks.R     # sensitivity, estimators, residuals (minutes)
+Rscript -e 'rmarkdown::render("docs/scaling_factors_report.Rmd")'
+Rscript -e 'rmarkdown::render("docs/scaling_factors_methods.Rmd")'
+```
+
+Every parameter of the method is in `R/00_config.R`: pollutants, period,
+longest window, completeness threshold, minimum years. The data preparation
+rules are functions in `R/functions.R` taking those thresholds as arguments, so
+that `04_method_checks.R` re-runs the identical code under different settings
+rather than a reimplementation of it.
+
+```{r session}
+si <- sessionInfo()
+pkgs <- c("dplyr", "lubridate", "purrr", "ggplot2", "knitr", "rmarkdown")
+data.frame(
+  Package = pkgs,
+  Version = sapply(pkgs, function(p) as.character(packageVersion(p)))
+) |>
+  rbind(data.frame(Package = "R", Version = paste(R.version$major, R.version$minor, sep = "."))) |>
+  kable(row.names = FALSE, caption = paste("Environment:", si$running))
+```

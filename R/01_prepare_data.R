@@ -1,12 +1,15 @@
 # ============================================================================
-# 01 - Prepare monthly and annual means
+# 01 - Prepare monthly, annual and rolling means
 #
 # Reads the raw hourly air quality data, resolves duplicate timestamps, applies
-# the data completeness rules and writes tidy monthly and annual means for the
-# pollutants and period set in R/00_config.R.
+# the data completeness rules and writes the tidy means the rest of the
+# analysis works from, for the pollutants and period set in R/00_config.R.
+#
+# The rules themselves live in R/functions.R so that R/04_method_checks.R can
+# re-run them under different settings.
 #
 # Outputs: output/monthly_means.csv, output/annual_means.csv,
-#          output/rolling_means.csv
+#          output/rolling_means.csv, output/prep_summary.csv
 # ============================================================================
 
 source("R/00_config.R")
@@ -15,83 +18,47 @@ source("R/functions.R")
 library(dplyr)
 library(lubridate)
 
-load(RAW_DATA) # provides all.data.long
-
 # ============================================================================
-# Subset to the pollutants and period of interest
-# ============================================================================
-
-hourly <- all.data.long |>
-  filter(
-    Parameter %in% METRICS,
-    !is.na(Value),
-    year(date) >= START_YEAR,
-    year(date) <= END_YEAR
-  ) |>
-  select(Parameter, site, date, Value)
-
-# Some site-pollutant combinations have two instruments reporting the same
-# hour (for example NO2 at queen_st in 2016). Average them so a single hour
-# contributes once to the monthly mean.
-n_duplicated <- sum(duplicated(hourly[c("Parameter", "site", "date")]))
-if (n_duplicated > 0) {
-  message(
-    "Averaging ", n_duplicated, " duplicated site/pollutant/hour records"
-  )
-  hourly <- hourly |>
-    group_by(Parameter, site, date) |>
-    summarise(Value = mean(Value), .groups = "drop")
-}
-
-# ============================================================================
-# Add the synthetic network-wide series
-# ============================================================================
-
-# The city series is the mean across all sites reporting a given hour, so it
+# Hourly data
+#
+# Duplicate site/pollutant/hour records (two instruments running in parallel)
+# are averaged, and the synthetic network-wide series is added, so that it
 # behaves like a single extra monitoring site in everything that follows.
-city <- hourly |>
-  group_by(Parameter, date) |>
-  summarise(Value = mean(Value), .groups = "drop") |>
-  mutate(site = CITY_SITE)
+# ============================================================================
 
-hourly <- bind_rows(hourly, city)
+hourly <- prepare_hourly(
+  RAW_DATA,
+  metrics = METRICS,
+  start_year = START_YEAR,
+  end_year = END_YEAR,
+  city_site = CITY_SITE
+)
+
+# Counts of what the duplicate rule touched, for the methods document
+prep_summary <- data.frame(
+  n_hourly_raw = attr(hourly, "n_hourly_raw"),
+  n_duplicated = attr(hourly, "n_duplicated"),
+  min_month_completeness = MIN_MONTH_COMPLETENESS,
+  start_year = START_YEAR,
+  end_year = END_YEAR
+)
 
 # ============================================================================
 # Monthly means and completeness
 # ============================================================================
 
-monthly <- hourly |>
-  mutate(year = year(date), month = month(date)) |>
-  group_by(Parameter, site, year, month) |>
-  summarise(monthly_mean = mean(Value), n_hours = n(), .groups = "drop") |>
-  mutate(
-    # Hours in the month, ignoring the one-hour daylight saving shifts
-    possible_hours = days_in_month(make_date(year, month, 1)) * 24,
-    completeness = n_hours / possible_hours,
-    complete = completeness >= MIN_MONTH_COMPLETENESS,
-    # Months numbered continuously from year 0, so that runs of months can
-    # cross the end of a calendar year
-    month_index = year * 12 + month - 1
-  )
+monthly <- monthly_from_hourly(hourly, MIN_MONTH_COMPLETENESS)
 
 # ============================================================================
-# Annual means
-# ============================================================================
-
+# Calendar-year means
+#
 # The annual mean is the mean of the twelve monthly means rather than the mean
 # of all hours, so that months with more data do not pull the annual figure
 # towards their own level. A year counts only if all twelve months are
 # complete, which keeps the target value comparable across sites and years.
-annual <- monthly |>
-  filter(complete) |>
-  group_by(Parameter, site, year) |>
-  summarise(
-    annual_mean = mean(monthly_mean),
-    n_months = n(),
-    .groups = "drop"
-  ) |>
-  filter(n_months == 12) |>
-  select(-n_months)
+# ============================================================================
+
+annual <- annual_from_monthly(monthly, weighting = "month")
 
 # ============================================================================
 # Rolling twelve-month means
@@ -115,6 +82,7 @@ rolling <- consecutive_means(
 write.csv(monthly, MONTHLY_MEANS, row.names = FALSE)
 write.csv(annual, ANNUAL_MEANS, row.names = FALSE)
 write.csv(rolling, ROLLING_MEANS, row.names = FALSE)
+write.csv(prep_summary, "output/prep_summary.csv", row.names = FALSE)
 
 cat(
   "01_prepare_data: ", nrow(monthly), " monthly means (",

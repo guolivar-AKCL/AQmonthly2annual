@@ -21,13 +21,20 @@ It is for the Auckland Council air quality team and anyone running campaign moni
 passive sampling or sensor deployments in Auckland who needs to report an annual figure.
 It supports *Ambient Air Quality in Auckland - trend analysis 2015 to 2024* (TR 2025/26).
 
-The final products are the technical report `docs/scaling_factors_report.Rmd` (knitted to
-HTML) and the factor table `output/scaling_factors.csv`. The `README.md` carries the
+The final products are the technical report `docs/scaling_factors_report.Rmd`, its
+methods and validation companion `docs/scaling_factors_methods.Rmd` (both knitted to
+HTML) and the factor table `output/scaling_factors.csv`. The report is going to peer
+review, so the methods document must stay an accurate description of what the code
+actually does: change a rule in `R/` and the corresponding section has to change with it. The `README.md` carries the
 headline numbers; keep them in step if the analysis changes.
 
 The pipeline is `R/00_config.R` (settings) then `R/01_prepare_data.R` ->
 `R/02_scaling_factors.R` -> `R/03_figures.R`, each reading the previous step's products
-from `output/`. Analysis parameters — pollutants, period, longest window, completeness
+from `output/`. `R/04_method_checks.R` sits beside them and re-runs the pipeline under
+varied settings for the methods document; it reads the raw data directly and takes a
+couple of minutes. The data preparation rules live in `R/functions.R` and take their
+thresholds as arguments precisely so that 04 exercises the same code, not a copy of it —
+keep it that way. Analysis parameters — pollutants, period, longest window, completeness
 thresholds — live in `00_config.R` and nowhere else.
 
 
