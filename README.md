@@ -10,9 +10,15 @@ reads low. This repository fits, for every pollutant and every window of one to
 six consecutive months, the factor `annual mean = f x sampled mean`, and
 measures how much error is left after the correction.
 
-The deliverable is [docs/scaling_factors_report.Rmd](docs/scaling_factors_report.Rmd)
-(knits to `docs/scaling_factors_report.html`) and the factor table
-`output/scaling_factors.csv`.
+The deliverables are two documents and a table:
+
+- [docs/scaling_factors_report.Rmd](docs/scaling_factors_report.Rmd) — the
+  technical report: results and how to apply the factors.
+- [docs/scaling_factors_methods.Rmd](docs/scaling_factors_methods.Rmd) — the
+  methods and validation companion, written for peer review: notation,
+  estimator derivations, alternatives tested, residual diagnostics and a
+  sensitivity analysis over every judgement in the method.
+- `output/scaling_factors.csv` — the factors themselves.
 
 Supports *Ambient Air Quality in Auckland - trend analysis 2015 to 2024*
 (TR 2025/26). Contact: gustavo.olivarespino@aucklandcouncil.govt.nz
@@ -45,7 +51,9 @@ Scripts run in filename order from the project root:
 Rscript R/01_prepare_data.R      # monthly and annual means, completeness rules
 Rscript R/02_scaling_factors.R   # fit the factors, score them out of sample
 Rscript R/03_figures.R           # report figures
+Rscript R/04_method_checks.R     # sensitivity, estimators, residuals (~2 min)
 Rscript -e 'rmarkdown::render("docs/scaling_factors_report.Rmd")'
+Rscript -e 'rmarkdown::render("docs/scaling_factors_methods.Rmd")'
 ```
 
 | File | What it does |
@@ -55,6 +63,7 @@ Rscript -e 'rmarkdown::render("docs/scaling_factors_report.Rmd")'
 | [R/01_prepare_data.R](R/01_prepare_data.R) | Resolves duplicate hours, adds the network-average series, applies completeness rules, writes monthly, annual and rolling twelve-month means. |
 | [R/02_scaling_factors.R](R/02_scaling_factors.R) | Fits site-specific and pooled factors for every window, against both the calendar-year and rolling twelve-month targets, and scores them. |
 | [R/03_figures.R](R/03_figures.R) | The five report figures. No analysis. |
+| [R/04_method_checks.R](R/04_method_checks.R) | Sensitivity analysis, estimator comparison and residual diagnostics for the methods document. Re-runs the pipeline under varied settings, so it reads the raw data and takes a couple of minutes. |
 
 Packages: **dplyr**, **lubridate**, **purrr**, **ggplot2**, **knitr**,
 **rmarkdown**; **rjson** and **curl** for the KiWIS fetch.
@@ -100,15 +109,20 @@ report data to run this.
 | `output/window_year_pairs.csv` | Sampled and annual mean for every site, year and window |
 | `output/scaling_factors.csv` | **The factors**, with confidence intervals, fitted and out-of-sample errors, and the two-parameter alternative |
 | `output/plots/` | The five report figures |
+| `output/sensitivity.csv` | Factors refitted under varied completeness thresholds, periods and target definitions |
+| `output/estimator_comparison.csv` | Four estimators scored on identical data |
+| `output/residuals.csv`, `output/residual_diagnostics.csv` | Per-site-year residuals and the diagnostics computed from them |
+| `output/prep_summary.csv` | Record counts from data preparation |
 | `docs/scaling_factors_report.html` | The technical report |
+| `docs/scaling_factors_methods.html` | The methods and validation companion |
 
 Key columns of `scaling_factors.csv`: `metric`, `target` (`calendar` or
 `rolling`), `site` (a site name, `auckland` for the network average, or
 `pooled`), `window`, `n_months`, `wraps` (window crosses the year end), `factor`
 with
 `factor_lwr`/`factor_upr`, `loo_pct_mae` (own-site error), `loso_pct_mae`
-(transfer error, pooled rows only), and `lm_intercept`/`lm_slope` for the
-two-parameter alternative.
+(transfer error, pooled rows only), `ratio_factor` (the mean-of-ratios
+alternative) and `lm_intercept`/`lm_slope` (the two-parameter alternative).
 
 ## Repository layout
 

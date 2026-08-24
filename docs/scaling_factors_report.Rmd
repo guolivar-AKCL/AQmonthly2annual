@@ -171,6 +171,24 @@ average rather than any single location.
 
 # Method
 
+This section states the method as far as a reader needs it to use the results.
+The full specification — notation, estimator derivations, the alternatives
+considered and rejected, residual diagnostics and a sensitivity analysis over
+every judgement made — is in the companion document
+*Monthly-to-annual scaling factors: methods and validation*
+(`docs/scaling_factors_methods.Rmd`). Three findings from it bear on how the
+results below should be read:
+
+- The factors are robust to the method's choices. Varying the completeness
+  threshold, the definition of the annual mean and the fitting period moves
+  them by under 2.5% at the median; the fitting period is the largest
+  sensitivity and the reason the factors should be refitted as the record
+  grows.
+- The published estimator is the most portable of four tested, not the
+  best-scoring one. Alternatives are supplied in the output file.
+- Residuals are not normal enough for a $\pm 1.96\,\sigma$ prediction
+  interval, which is why the errors quoted here are empirical.
+
 ## Two targets
 
 Most campaigns are reported against a **calendar year**, and that is the primary
@@ -500,7 +518,9 @@ Rules for applying these factors:
 Rscript R/01_prepare_data.R      # monthly and annual means
 Rscript R/02_scaling_factors.R   # fit the factors
 Rscript R/03_figures.R           # report figures
+Rscript R/04_method_checks.R     # sensitivity, estimators, residuals
 Rscript -e 'rmarkdown::render("docs/scaling_factors_report.Rmd")'
+Rscript -e 'rmarkdown::render("docs/scaling_factors_methods.Rmd")'
 ```
 
 Settings — pollutants, period, longest window, completeness thresholds — are in
@@ -514,3 +534,4 @@ Settings — pollutants, period, longest window, completeness thresholds — are
 | `output/window_year_pairs.csv` | Sampled and annual mean for every site, year and window |
 | `output/scaling_factors.csv` | Fitted factors and error metrics, for both targets (`target`, `wraps`) |
 | `output/plots/` | Report figures |
+| `output/sensitivity.csv`, `output/estimator_comparison.csv`, `output/residuals.csv`, `output/residual_diagnostics.csv` | Method checks behind the companion methods document |
