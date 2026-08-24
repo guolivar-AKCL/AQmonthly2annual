@@ -1,0 +1,390 @@
+---
+title: "Scaling short-term air quality measurements to annual means"
+subtitle: "Monthly-to-annual scaling factors for Auckland, 2015-2024"
+author: "Gustavo Olivares, Auckland Council"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    df_print: kable
+    theme: flatly
+---
+
+```{r setup, include = FALSE}
+knitr::opts_knit$set(root.dir = normalizePath(".."))
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+```
+
+```{r load}
+source("R/00_config.R")
+library(dplyr)
+library(knitr)
+
+# Figures come from R/03_figures.R. The path is resolved from the project
+# root, which is the working directory for chunks (see the setup chunk).
+fig_path <- function(name) normalizePath(file.path(PLOT_DIR, name), mustWork = TRUE)
+
+factors <- read.csv(SCALING_FACTORS)
+pairs <- read.csv("output/window_year_pairs.csv")
+monthly <- read.csv(MONTHLY_MEANS)
+annual <- read.csv(ANNUAL_MEANS)
+
+pooled <- factors |> filter(site == "pooled")
+label_metric <- function(x) unname(METRIC_LABELS[x])
+
+# Best window of each length for each pollutant, by out-of-sample error
+best_of_length <- pooled |>
+  group_by(metric, n_months) |>
+  slice_min(loo_pct_mae, n = 1, with_ties = FALSE) |>
+  ungroup()
+
+pick <- function(m, n) best_of_length |> filter(metric == m, n_months == n)
+
+# Pollutants where the best single month beats the worst four-month window
+month_beats_four <- pooled |>
+  group_by(metric) |>
+  summarise(
+    beats = min(loo_pct_mae[n_months == 1]) < max(loo_pct_mae[n_months == 4]),
+    .groups = "drop"
+  ) |>
+  filter(beats) |>
+  pull(metric)
+
+# How far individual site-years miss when a pooled factor is transferred
+transfer_max <- pooled |> filter(n_months == 4) |> pull(loso_pct_max)
+transfer_ratio <- pooled |> filter(n_months == 4) |>
+  summarise(r = median(loso_pct_max / loso_pct_mae)) |> pull(r)
+
+# Single factor against the two-parameter alternative, out of sample
+lm_gain <- median(pooled$loo_pct_mae - pooled$lm_loo_pct_mae)
+```
+
+# Summary
+
+A monitoring campaign that runs for part of a year does not measure the annual
+mean, and the difference is not random: in Auckland every pollutant considered
+here has a pronounced seasonal cycle, so a winter campaign systematically reads
+high and a summer campaign systematically reads low. This report quantifies
+that bias as a set of **scaling factors** — one multiplier per pollutant and
+sampling window that converts the mean of the sampled months into an estimate
+of the annual mean — and, just as importantly, states how much error remains
+after the correction.
+
+The factors were fitted on `r START_YEAR`-`r END_YEAR` hourly data from the
+Auckland Council ambient air quality network and validated out of sample. The
+headline results:
+
+- **A corrected four-month campaign estimates the annual mean to within about
+  `r sprintf("%.0f", pick("pm2.5", 4)$loo_pct_mae)`% for PM2.5,
+  `r sprintf("%.0f", pick("pm10", 4)$loo_pct_mae)`% for PM10 and
+  `r sprintf("%.0f", pick("no2", 4)$loo_pct_mae)`% for NO2** on average, if the
+  best window is chosen.
+- **Which months you sample matters more than how many.** For
+  `r paste(label_metric(month_beats_four), collapse = " and ")` the best single
+  month beats the worst four-month window.
+- **Seasonal bias is large.** A May-August (winter) campaign overstates the
+  annual mean of NO2 by roughly
+  `r sprintf("%.0f", (1 / pooled$factor[pooled$metric == "no2" & pooled$window == "May-Aug"] - 1) * 100)`%
+  if it is used uncorrected.
+- The factors are **transferable between sites** on average, but not
+  universally: applied to a site that contributed nothing to fitting them, the
+  typical error is close to the within-site figure while individual site-years
+  can be out by up to `r sprintf("%.0f", max(transfer_max))`%.
+
+The full factor table is `output/scaling_factors.csv`. [Using the factors](#using-the-factors) shows how to apply it.
+
+# Purpose
+
+Campaign monitoring, passive sampling and low-cost sensor deployments are
+usually run for weeks or months, not years, while air quality guidelines,
+trend statements and exposure estimates are expressed as annual means. Bridging
+that gap needs an answer to three questions:
+
+1. If I can only monitor for *n* months, **which months** should I choose?
+2. **What multiplier** converts the result to an annual mean?
+3. **How wrong** is that estimate likely to be?
+
+# Data
+
+```{r data-summary}
+site_years <- annual |>
+  filter(site != CITY_SITE) |>
+  count(Parameter, name = "site_years")
+
+span <- annual |>
+  filter(site != CITY_SITE) |>
+  group_by(Parameter) |>
+  summarise(
+    sites = n_distinct(site),
+    years = paste(min(year), max(year), sep = "-"),
+    mean_conc = mean(annual_mean),
+    .groups = "drop"
+  ) |>
+  left_join(site_years, by = "Parameter") |>
+  mutate(Pollutant = label_metric(Parameter)) |>
+  select(Pollutant, `Sites` = sites, `Complete site-years` = site_years,
+         `Period` = years, `Mean annual (µg/m³)` = mean_conc)
+
+kable(span, digits = 1, caption = "Data behind the scaling factors")
+```
+
+Hourly measurements come from the Auckland Council ambient air quality
+monitoring network (`data/aq_data_SOE2025.RData`, the dataset compiled for
+*Ambient Air Quality in Auckland - trend analysis 2015 to 2024*, TR 2025/26),
+covering ten sites that range from rural background (patumahoe) to city-centre
+kerbside (queen_st, customs_st).
+
+Three data handling rules apply:
+
+- **Duplicate hours.** A few site-pollutant-hour records appear twice where two
+  instruments ran in parallel; these are averaged so an hour contributes once.
+- **Monthly completeness.** A month counts only if at least
+  `r sprintf("%.0f", MIN_MONTH_COMPLETENESS * 100)`% of its hours were
+  measured.
+- **Annual completeness.** A year counts only if all twelve of its months are
+  complete. The annual mean is then the mean of the twelve monthly means, so
+  that months with more data do not pull the annual figure toward their own
+  level.
+
+A synthetic `auckland` series — the mean across all sites reporting each hour —
+is carried through the analysis as an eleventh site, representing the network
+average rather than any single location.
+
+# Method
+
+For a pollutant, a site and a window of consecutive months:
+
+1. Average the monthly means inside the window to get the **sampled mean** for
+   each year, discarding years where any month in the window is incomplete.
+2. Take the **annual mean** for the same year as the target.
+3. Fit, across years, the through-origin regression
+   $$\text{annual} = f \times \text{sampled}$$
+   The single coefficient $f$ is the **scaling factor**. A factor below 1 means
+   the window reads high relative to the year; above 1, it reads low.
+4. Report the error left over after the correction.
+
+Windows of one to `r MAX_WINDOW` consecutive months are evaluated — all
+`r nrow(pooled |> distinct(window))` of them — for each pollutant and site with
+at least `r MIN_YEARS` usable years.
+
+A through-origin factor is preferred to a two-parameter regression
+(`annual = a + b * sampled`) because it is what a campaign can actually apply:
+one number, no intercept that has to be assumed to hold at a concentration
+level different from the fitting data. It costs little: out of sample the
+two-parameter model is better by a median of only
+`r sprintf("%.1f", lm_gain)` percentage points. Both are reported in the output
+file (`factor` and `lm_intercept`/`lm_slope`) so the choice can be revisited.
+
+## How the error is measured
+
+Fitting error understates how the factor will behave on a new measurement, so
+every window is also scored **leave-one-out**: the factor is refitted with one
+year held out and used to predict that year, repeated for every year. All
+percentage errors quoted in this report are leave-one-out mean absolute errors
+unless stated otherwise.
+
+Factors are fitted two ways:
+
+- **Site-specific** — one factor per site, for correcting future campaigns at a
+  site that already has a monitoring record.
+- **Pooled** — one factor per pollutant and window fitted across all site-years
+  at once, for use at locations with no record of their own. These are the
+  factors to reach for in a new study, and they are additionally scored
+  **leave-one-site-out**: fitted without a site entirely, then applied to it.
+
+# Results
+
+## Which months to sample
+
+```{r fig1, out.width = "85%", fig.align = "center"}
+include_graphics(fig_path("fig1_window_error_heatmap.png"), error = FALSE)
+```
+
+Each cell is one sampling window. The pattern is consistent across pollutants:
+windows that **straddle a seasonal transition** do well, and windows that sit
+entirely inside one season do badly, because a mid-season window carries the
+full seasonal offset and any year-to-year variation in the strength of that
+season goes straight into the estimate.
+
+```{r best-table}
+best_of_length |>
+  transmute(
+    Pollutant = label_metric(metric),
+    `Months` = n_months,
+    `Best window` = window,
+    `Factor` = factor,
+    `Error (%)` = loo_pct_mae,
+    `Transfer error (%)` = loso_pct_mae
+  ) |>
+  arrange(match(Pollutant, unname(METRIC_LABELS)), Months) |>
+  kable(
+    digits = c(0, 0, 0, 3, 1, 1),
+    caption = "Best sampling window of each length, pooled across sites. Transfer error is leave-one-site-out."
+  )
+```
+
+## How long to sample
+
+```{r fig2, out.width = "100%", fig.align = "center"}
+include_graphics(fig_path("fig2_error_by_window_length.png"), error = FALSE)
+```
+
+Error falls with campaign length, but with sharply diminishing returns, and the
+spread *within* a given length is as large as the improvement from one length
+to the next. Choosing the right four months is worth more than running a poorly
+timed campaign for six.
+
+## The factors
+
+```{r fig4, out.width = "100%", fig.align = "center"}
+include_graphics(fig_path("fig4_four_month_factors.png"), error = FALSE)
+```
+
+The factors trace the seasonal cycle directly. Windows centred on winter sit
+well below 1 — winter concentrations exceed the annual mean, so the measurement
+must be scaled down — and windows centred on late summer sit above 1. NO2 has
+the strongest seasonality and therefore the largest corrections, PM10 the
+weakest.
+
+```{r fig3, out.width = "100%", fig.align = "center"}
+include_graphics(fig_path("fig3_sampled_vs_annual.png"), error = FALSE)
+```
+
+## Site-to-site variation
+
+```{r site-variation}
+four_month <- factors |> filter(n_months == 4, site != "pooled", site != CITY_SITE)
+
+spread <- four_month |>
+  group_by(metric, window) |>
+  summarise(sites = n(), spread = max(factor) - min(factor), .groups = "drop") |>
+  group_by(metric) |>
+  summarise(
+    `Sites with their own factor` = max(sites),
+    `Median spread across windows` = median(spread),
+    `Largest spread` = max(spread),
+    .groups = "drop"
+  ) |>
+  filter(`Sites with their own factor` > 1) |>
+  mutate(Pollutant = label_metric(metric)) |>
+  select(Pollutant, everything(), -metric)
+
+kable(spread, digits = 3, caption = "Range of site-specific four-month factors within a window")
+```
+
+Site-specific factors for the same window differ by more than their confidence
+intervals, so the differences are structure rather than noise. A winter NO2
+campaign makes the point:
+
+```{r site-no2}
+factors |>
+  filter(metric == "no2", window == "May-Aug", site != "pooled") |>
+  arrange(factor) |>
+  transmute(
+    Site = ifelse(site == CITY_SITE, paste0(site, " (network average)"), site),
+    Factor = factor,
+    `95% CI` = sprintf("%.2f - %.2f", factor_lwr, factor_upr),
+    Years = n_years,
+    `Error (%)` = loo_pct_mae
+  ) |>
+  kable(digits = c(0, 3, 0, 0, 1), caption = "Site-specific NO2 factors for a May-August campaign")
+```
+
+The kerbside and roadside sites (queen_st, khyber_pass) need the smallest
+correction because traffic emissions run year-round and flatten the seasonal
+cycle, while the suburban sites (glen_eden, henderson, takapuna) need the
+largest, consistent with a winter peak driven by domestic heating on top of
+poorer dispersion. Applying a suburban factor at a kerbside site, or the
+reverse, would introduce an error larger than the residual error of either
+factor. **Where a site has its own record, use its own factor**; where it does
+not, match it to the pooled factor and carry the transfer error.
+
+PM2.5 is missing from the first table because only one site
+(`r factors |> filter(metric == "pm2.5", site != "pooled", site != CITY_SITE) |> distinct(site) |> pull(site) |> paste(collapse = ", ")`)
+has enough complete years for a site-specific factor.
+
+# Using the factors {#using-the-factors}
+
+```{r worked-example}
+eg <- pick("no2", 4)
+eg_measured <- 25
+```
+
+**Read the factor from `output/scaling_factors.csv`**, matching on `metric`,
+`window` and `site` (use `site == "pooled"` if the location has no long record
+of its own), then
+
+$$\widehat{\text{annual mean}} = f \times \overline{\text{campaign}}$$
+
+Worked example. A `r eg$window` NO2 campaign at a new location averages
+`r eg_measured` µg/m³. The pooled `r eg$window` factor is
+`r sprintf("%.3f", eg$factor)`, so the estimated annual mean is
+**`r sprintf("%.1f", eg$factor * eg_measured)` µg/m³**. The leave-one-site-out
+error for this window is `r sprintf("%.0f", eg$loso_pct_mae)`%, so the estimate
+should be quoted as roughly
+`r sprintf("%.0f", eg$factor * eg_measured * (1 - eg$loso_pct_mae / 100))`-`r sprintf("%.0f", eg$factor * eg_measured * (1 + eg$loso_pct_mae / 100))`
+µg/m³. Without the correction the campaign figure of `r eg_measured` µg/m³
+would have overstated the annual mean by
+`r sprintf("%.0f", (eg_measured / (eg$factor * eg_measured) - 1) * 100)`%.
+
+Rules for applying these factors:
+
+- **Quote the uncertainty.** A scaled estimate is not an annual mean. Report it
+  with the `loo_pct_mae` (own site) or `loso_pct_mae` (new site) percentage
+  attached, and note that individual years can miss by around
+  `r sprintf("%.0f", transfer_ratio)` times that.
+- **The campaign must cover the whole window.** The factors assume complete
+  months; a campaign that stops halfway through a month is not the window that
+  was fitted.
+- **Do not use them across a threshold decision without care.** An estimate
+  within the error band of a guideline value cannot resolve compliance.
+- **Match the measurement.** The factors were fitted on reference-grade hourly
+  data averaged to monthly means. A campaign using a different method should
+  correct for method bias first.
+- **They are Auckland factors.** They encode Auckland's seasonal cycle and
+  emission mix, and should not be transported to a region with a different
+  climate or heating regime without re-fitting.
+
+# Limitations
+
+- **PM2.5 has a thin record.**
+  `r annual |> filter(Parameter == "pm2.5", site != CITY_SITE) |> nrow()`
+  complete site-years across
+  `r annual |> filter(Parameter == "pm2.5", site != CITY_SITE) |> distinct(site) |> nrow()`
+  sites survive the completeness rules, because most PM2.5 monitoring in the
+  network started part-way through the period. The PM2.5 factors are the least
+  well constrained here.
+- **Windows do not cross the new year.** Only windows inside a calendar year
+  are evaluated, so a campaign spanning, say, November to February is not
+  covered. Adding wrap-around windows would require defining the target as a
+  rolling twelve-month mean rather than a calendar year.
+- **The factors are period averages.** Concentrations trended downward over
+  `r START_YEAR`-`r END_YEAR`; the factors describe the seasonal shape averaged
+  over that decade and do not adjust for where in a trend a campaign sits.
+- **Completeness is measured, not audited.** The analysis uses the data as
+  supplied; it does not re-examine instrument validity flags.
+- **A factor is not a substitute for measurement.** For compliance assessment
+  against an annual guideline, a full year of monitoring remains the only
+  defensible approach.
+
+# Reproducing this analysis
+
+```
+Rscript R/01_prepare_data.R      # monthly and annual means
+Rscript R/02_scaling_factors.R   # fit the factors
+Rscript R/03_figures.R           # report figures
+Rscript -e 'rmarkdown::render("docs/scaling_factors_report.Rmd")'
+```
+
+Settings — pollutants, period, longest window, completeness thresholds — are in
+`R/00_config.R`. Outputs:
+
+| File | Contents |
+|------|----------|
+| `output/monthly_means.csv` | Monthly means with hour counts and completeness |
+| `output/annual_means.csv` | Annual means for complete years |
+| `output/window_year_pairs.csv` | Sampled and annual mean for every site, year and window |
+| `output/scaling_factors.csv` | Fitted factors and error metrics |
+| `output/plots/` | Report figures |
