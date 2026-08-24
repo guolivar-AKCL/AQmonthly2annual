@@ -31,7 +31,10 @@ pairs <- read.csv("output/window_year_pairs.csv")
 monthly <- read.csv(MONTHLY_MEANS)
 annual <- read.csv(ANNUAL_MEANS)
 
-pooled <- factors |> filter(site == "pooled")
+# The calendar-year target carries the main results; the rolling twelve-month
+# target is used for campaigns that cross the end of a year (section 5.5)
+pooled <- factors |> filter(site == "pooled", target == "calendar")
+pooled_rolling <- factors |> filter(site == "pooled", target == "rolling")
 label_metric <- function(x) unname(METRIC_LABELS[x])
 
 # Best window of each length for each pollutant, by out-of-sample error
@@ -56,6 +59,15 @@ month_beats_four <- pooled |>
 transfer_max <- pooled |> filter(n_months == 4) |> pull(loso_pct_max)
 transfer_ratio <- pooled |> filter(n_months == 4) |>
   summarise(r = median(loso_pct_max / loso_pct_mae)) |> pull(r)
+
+# Agreement between the two targets where a window fits inside a calendar year
+factor_agreement <- pooled |>
+  select(metric, window, calendar = factor) |>
+  inner_join(
+    pooled_rolling |> filter(!wraps) |> select(metric, window, rolling = factor),
+    by = c("metric", "window")
+  ) |>
+  mutate(diff = abs(rolling - calendar))
 
 # Single factor against the two-parameter alternative, out of sample
 lm_gain <- median(pooled$loo_pct_mae - pooled$lm_loo_pct_mae)
@@ -88,6 +100,11 @@ headline results:
   annual mean of NO2 by roughly
   `r sprintf("%.0f", (1 / pooled$factor[pooled$metric == "no2" & pooled$window == "May-Aug"] - 1) * 100)`%
   if it is used uncorrected.
+- **A campaign crossing the year end can be corrected too**, against a rolling
+  twelve-month mean rather than a calendar year, but it is the expensive way to
+  do it: the best year-end window carries roughly
+  `r sprintf("%.0f", (pooled_rolling |> filter(metric == "no2", n_months == 4, wraps) |> pull(loo_pct_mae) |> min()) / (pick("no2", 4)$loo_pct_mae))`
+  times the error of the best-timed four-month campaign for NO2.
 - The factors are **transferable between sites** on average, but not
   universally: applied to a site that contributed nothing to fitting them, the
   typical error is close to the within-site figure while individual site-years
@@ -154,20 +171,48 @@ average rather than any single location.
 
 # Method
 
+## Two targets
+
+Most campaigns are reported against a **calendar year**, and that is the primary
+target here: the window sits inside the year it is compared to. A campaign that
+runs across the end of a year — a summer campaign in the southern hemisphere —
+has no single calendar year to sit inside, so it is fitted against a **rolling
+twelve-month mean** instead: the twelve months beginning with the campaign's
+first month.
+
+Both targets are fitted for every window, so the two are directly comparable.
+Where a window fits inside a calendar year the two mostly agree: across all
+`r nrow(factor_agreement)` such windows the median difference in the factor is
+`r sprintf("%.02f", median(factor_agreement$diff))`, which is the check that the
+rolling machinery behaves. The exceptions are short windows late in the year
+(the largest is
+`r with(factor_agreement, sprintf("%s %s, %.2f against %.2f", label_metric(metric[which.max(diff)]), window[which.max(diff)], calendar[which.max(diff)], rolling[which.max(diff)]))`),
+and they are not an error: a November measurement compared with its own
+calendar year and the same measurement compared with the following twelve
+months are genuinely different questions. Windows that cross the year end are
+available only against the rolling target.
+
+## Fitting
+
 For a pollutant, a site and a window of consecutive months:
 
 1. Average the monthly means inside the window to get the **sampled mean** for
    each year, discarding years where any month in the window is incomplete.
-2. Take the **annual mean** for the same year as the target.
+2. Take the **target mean** — the calendar year the window sits in, or the
+   twelve months beginning with the window.
 3. Fit, across years, the through-origin regression
-   $$\text{annual} = f \times \text{sampled}$$
+   $$\text{target} = f \times \text{sampled}$$
    The single coefficient $f$ is the **scaling factor**. A factor below 1 means
    the window reads high relative to the year; above 1, it reads low.
 4. Report the error left over after the correction.
 
-Windows of one to `r MAX_WINDOW` consecutive months are evaluated — all
-`r nrow(pooled |> distinct(window))` of them — for each pollutant and site with
-at least `r MIN_YEARS` usable years.
+Windows of one to `r MAX_WINDOW` consecutive months are evaluated —
+`r nrow(pooled |> distinct(window))` of them against the calendar year and
+`r nrow(pooled_rolling |> distinct(window))` against a rolling year — for each
+pollutant and site with at least `r MIN_YEARS` usable years. For a fixed window
+start month the rolling targets of successive years do not overlap, so the
+error metrics are scored on independent years exactly as for the calendar
+target.
 
 A through-origin factor is preferred to a two-parameter regression
 (`annual = a + b * sampled`) because it is what a campaign can actually apply:
@@ -305,6 +350,74 @@ PM2.5 is missing from the first table because only one site
 (`r factors |> filter(metric == "pm2.5", site != "pooled", site != CITY_SITE) |> distinct(site) |> pull(site) |> paste(collapse = ", ")`)
 has enough complete years for a site-specific factor.
 
+## Campaigns that cross the year end
+
+A summer campaign in Auckland runs from one calendar year into the next, so
+there is no calendar year for it to sit inside. Against a rolling twelve-month
+target it can still be corrected:
+
+```{r fig5, out.width = "85%", fig.align = "center"}
+include_graphics(fig_path("fig5_rolling_target_windows.png"), error = FALSE)
+```
+
+```{r wrap-table}
+pooled_rolling |>
+  filter(wraps, n_months %in% c(3, 4, 6)) |>
+  arrange(match(label_metric(metric), unname(METRIC_LABELS)), n_months, window) |>
+  transmute(
+    Pollutant = label_metric(metric),
+    Months = n_months,
+    Window = window,
+    Factor = factor,
+    `95% CI` = sprintf("%.2f - %.2f", factor_lwr, factor_upr),
+    Years = n_years,
+    `Error (%)` = loo_pct_mae,
+    `Transfer error (%)` = loso_pct_mae
+  ) |>
+  kable(
+    digits = c(0, 0, 0, 3, 0, 0, 1, 1),
+    caption = "Scaling factors for windows that cross the end of the year, against a rolling twelve-month mean"
+  )
+```
+
+Two things follow from this table and the figure above.
+
+**The correction is real and mostly upward.** Summer months sit below the
+annual mean, so year-end windows carry factors above 1 — a Dec-Mar NO2 campaign
+must be scaled up by
+`r sprintf("%.0f", (pooled_rolling |> filter(metric == "no2", window == "Dec-Mar", n_months == 4) |> pull(factor) - 1) * 100)`%.
+Left uncorrected, such a campaign would understate the annual mean by about
+that much.
+
+**It is the expensive way to run a campaign.** A four-month window crossing the
+year end carries an error of
+`r sprintf("%.0f", pooled_rolling |> filter(metric == "no2", n_months == 4, wraps) |> pull(loo_pct_mae) |> min())`-`r sprintf("%.0f", pooled_rolling |> filter(metric == "no2", n_months == 4, wraps) |> pull(loo_pct_mae) |> max())`%
+for NO2, against
+`r sprintf("%.0f", pick("no2", 4)$loo_pct_mae)`% for the best-timed four months.
+The whole late-year half of the rolling figure is worse than the early-year
+half, and not only for the windows that wrap: against a target that runs
+forward from the campaign, a campaign starting late in the year is estimating a
+period it barely overlaps in season, and mid-summer is exactly where the
+seasonal cycle is furthest from the annual mean.
+
+```{r summer-rescue}
+summer_six <- pooled_rolling |>
+  filter(metric == "no2", n_months == 6, wraps) |>
+  slice_min(loo_pct_mae, n = 1)
+```
+
+**If a summer start is fixed, extend the campaign.** Running through to the
+other side of the seasonal cycle recovers most of the loss: `r summer_six$window`
+NO2 scores `r sprintf("%.1f", summer_six$loo_pct_mae)`%, against
+`r sprintf("%.0f", pooled_rolling |> filter(metric == "no2", n_months == 4, wraps) |> pull(loo_pct_mae) |> min())`%
+for the best four-month year-end window. A campaign that starts in December and
+stops in March is estimating a year it has only seen the summer of; one that
+runs to May has seen the transition into winter as well.
+
+So the recommendation is unchanged — sample the shoulder seasons if you have
+the choice. These factors are for campaigns whose timing is already fixed, and
+they should be quoted with their larger error.
+
 # Using the factors {#using-the-factors}
 
 ```{r worked-example}
@@ -313,8 +426,12 @@ eg_measured <- 25
 ```
 
 **Read the factor from `output/scaling_factors.csv`**, matching on `metric`,
-`window` and `site` (use `site == "pooled"` if the location has no long record
-of its own), then
+`window`, `site` (use `site == "pooled"` if the location has no long record of
+its own) and `target`. Use `target == "calendar"` when the campaign sits inside
+one calendar year and the annual mean of that year is what you want to report;
+use `target == "rolling"` when it crosses the year end, remembering that the
+estimate then refers to the twelve months beginning with the campaign, not to a
+calendar year. Then
 
 $$\widehat{\text{annual mean}} = f \times \overline{\text{campaign}}$$
 
@@ -335,6 +452,8 @@ Rules for applying these factors:
   with the `loo_pct_mae` (own site) or `loso_pct_mae` (new site) percentage
   attached, and note that individual years can miss by around
   `r sprintf("%.0f", transfer_ratio)` times that.
+- **Say which year you mean.** A rolling-target estimate is not a calendar-year
+  figure and should not be compared with one without saying so.
 - **The campaign must cover the whole window.** The factors assume complete
   months; a campaign that stops halfway through a month is not the window that
   was fitted.
@@ -356,10 +475,16 @@ Rules for applying these factors:
   sites survive the completeness rules, because most PM2.5 monitoring in the
   network started part-way through the period. The PM2.5 factors are the least
   well constrained here.
-- **Windows do not cross the new year.** Only windows inside a calendar year
-  are evaluated, so a campaign spanning, say, November to February is not
-  covered. Adding wrap-around windows would require defining the target as a
-  rolling twelve-month mean rather than a calendar year.
+- **A rolling year is anchored at the start of the campaign.** The rolling
+  target is the twelve months *beginning* with the window, so a campaign sits at
+  the front of the period it estimates rather than inside it. A target centred
+  on the campaign would be a defensible alternative and would probably score
+  better for late-year windows; it was not fitted here because a period running
+  from six months before the campaign is rarely what a study wants to report.
+- **Year-end windows have a shorter record.** A rolling year starting late in
+  `r END_YEAR` needs months from the following year, which the dataset does not
+  contain, so the wrapping windows are fitted on one fewer year than their
+  calendar equivalents.
 - **The factors are period averages.** Concentrations trended downward over
   `r START_YEAR`-`r END_YEAR`; the factors describe the seasonal shape averaged
   over that decade and do not adjust for where in a trend a campaign sits.
@@ -384,7 +509,8 @@ Settings — pollutants, period, longest window, completeness thresholds — are
 | File | Contents |
 |------|----------|
 | `output/monthly_means.csv` | Monthly means with hour counts and completeness |
-| `output/annual_means.csv` | Annual means for complete years |
+| `output/annual_means.csv` | Annual means for complete calendar years |
+| `output/rolling_means.csv` | Rolling twelve-month means at every start month |
 | `output/window_year_pairs.csv` | Sampled and annual mean for every site, year and window |
-| `output/scaling_factors.csv` | Fitted factors and error metrics |
+| `output/scaling_factors.csv` | Fitted factors and error metrics, for both targets (`target`, `wraps`) |
 | `output/plots/` | Report figures |
