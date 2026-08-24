@@ -11,6 +11,12 @@ pollutant (PM2.5, PM10, NO2), each Auckland monitoring site and each window of o
 consecutive months, it fits `annual mean = f x sampled mean` and scores how much error
 survives the correction, out of sample.
 
+Two targets are fitted: the calendar year a window sits in (the primary one) and a
+rolling twelve-month mean beginning with the window, which is what lets a summer
+campaign crossing the end of a year be corrected. Rows in
+`output/scaling_factors.csv` are distinguished by the `target` column, so any new
+analysis or figure must say which target it means.
+
 It is for the Auckland Council air quality team and anyone running campaign monitoring,
 passive sampling or sensor deployments in Auckland who needs to report an annual figure.
 It supports *Ambient Air Quality in Auckland - trend analysis 2015 to 2024* (TR 2025/26).

@@ -14,7 +14,8 @@ library(dplyr)
 library(ggplot2)
 
 factors <- read.csv(SCALING_FACTORS)
-pairs <- read.csv("output/window_year_pairs.csv")
+pairs <- read.csv("output/window_year_pairs.csv") |>
+  filter(target == "calendar")
 
 dir.create(PLOT_DIR, showWarnings = FALSE, recursive = TRUE)
 
@@ -36,13 +37,18 @@ theme_report <- theme_minimal(base_size = 11) +
 
 label_metric <- function(x) unname(METRIC_LABELS[x])
 
-# Pooled factors, with the window's first month for ordering along the x axis
-pooled <- factors |>
+# Pooled factors, with the window's first month for ordering along the x axis.
+# The calendar-year target is the default view; the rolling-year target has its
+# own figure at the end.
+pooled_all <- factors |>
   filter(site == "pooled") |>
   mutate(
     metric_label = factor(label_metric(metric), levels = unname(METRIC_LABELS)),
     start_month = match(substr(window, 1, 3), month.abb)
   )
+
+pooled <- pooled_all |> filter(target == "calendar")
+pooled_rolling <- pooled_all |> filter(target == "rolling")
 
 # ============================================================================
 # Figure 1: which months to sample
@@ -84,7 +90,7 @@ ggsave(
 # ============================================================================
 
 by_length <- factors |>
-  filter(site != "pooled") |>
+  filter(site != "pooled", target == "calendar") |>
   mutate(metric_label = factor(label_metric(metric), levels = unname(METRIC_LABELS)))
 
 fig_length <- ggplot(by_length, aes(x = factor(n_months), y = loo_pct_mae)) +
@@ -137,7 +143,7 @@ scatter_data <- pairs |>
   arrange(metric_label) |>
   mutate(panel = factor(panel, levels = unique(panel)))
 
-fig_scatter <- ggplot(scatter_data, aes(x = sampled_mean, y = annual_mean)) +
+fig_scatter <- ggplot(scatter_data, aes(x = sampled_mean, y = target_mean)) +
   geom_abline(slope = 1, intercept = 0, colour = "grey75", linetype = "dashed") +
   geom_abline(
     data = distinct(scatter_data, panel, factor),
@@ -193,4 +199,47 @@ ggsave(
   width = 9, height = 4.5, dpi = 300
 )
 
-cat("03_figures: 4 figures written to ", PLOT_DIR, "/\n", sep = "")
+# ============================================================================
+# Figure 5: windows that cross the end of the year
+#
+# Same view as figure 1 but against the rolling twelve-month target, so windows
+# starting late in the year can be shown. Outlined cells are the ones that run
+# past December.
+# ============================================================================
+
+fig_rolling <- ggplot(
+  pooled_rolling,
+  aes(x = start_month, y = n_months, fill = loo_pct_mae)
+) +
+  geom_tile(colour = "white", linewidth = 0.5) +
+  geom_tile(
+    data = pooled_rolling |> filter(wraps),
+    fill = NA, colour = "#eb6834", linewidth = 0.9
+  ) +
+  geom_text(
+    aes(label = sprintf("%.0f", loo_pct_mae), colour = loo_pct_mae > 10),
+    size = 2.7, show.legend = FALSE
+  ) +
+  scale_colour_manual(values = c("TRUE" = "white", "FALSE" = "#0b0b0b")) +
+  scale_fill_gradient(low = SEQ_LOW, high = SEQ_HIGH, name = "Mean error (%)") +
+  scale_x_continuous(breaks = 1:12, labels = month.abb, expand = c(0, 0)) +
+  scale_y_continuous(breaks = 1:MAX_WINDOW, expand = c(0, 0)) +
+  facet_wrap(~metric_label, ncol = 1) +
+  labs(
+    title = "Error against a rolling twelve-month mean",
+    subtitle = paste(
+      "Target is the twelve months beginning with the campaign.",
+      "Outlined: windows that run past December"
+    ),
+    x = "First month sampled",
+    y = "Months sampled"
+  ) +
+  theme_report +
+  theme(panel.grid.major = element_blank())
+
+ggsave(
+  file.path(PLOT_DIR, "fig5_rolling_target_windows.png"), fig_rolling,
+  width = 8, height = 8, dpi = 300
+)
+
+cat("03_figures: 5 figures written to ", PLOT_DIR, "/\n", sep = "")

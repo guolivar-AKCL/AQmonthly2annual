@@ -131,6 +131,16 @@ month_windows <- function(max_window = 6) {
   windows
 }
 
+#' The n months starting at a given month, wrapping past December
+#'
+#' @param start Starting month number.
+#' @param n Number of months.
+#' @return An integer vector of month numbers, e.g. `wrap_months(11, 4)` is
+#'   November, December, January, February.
+wrap_months <- function(start, n) {
+  (start - 1 + seq_len(n) - 1) %% 12 + 1
+}
+
 #' Short human-readable label for a set of months
 #'
 #' @param months Integer vector of month numbers.
@@ -206,7 +216,7 @@ fit_linear_model <- function(sampled, annual) {
 #' site's years, repeated for every site. This is the error to quote when the
 #' factor is applied at a location that contributed nothing to fitting it.
 #'
-#' @param data Data frame with `site`, `sampled_mean` and `annual_mean`.
+#' @param data Data frame with `site`, `sampled_mean` and `target_mean`.
 #' @return A one-row data frame with the mean and maximum percentage error and
 #'   the number of sites tested.
 loso_error <- function(data) {
@@ -219,8 +229,8 @@ loso_error <- function(data) {
     held_out <- data[data$site == s, ]
     rest <- data[data$site != s, ]
     if (nrow(rest) < 2) return(numeric(0))
-    factor <- sum(rest$sampled_mean * rest$annual_mean) / sum(rest$sampled_mean^2)
-    abs(factor * held_out$sampled_mean - held_out$annual_mean) / held_out$annual_mean * 100
+    factor <- sum(rest$sampled_mean * rest$target_mean) / sum(rest$sampled_mean^2)
+    abs(factor * held_out$sampled_mean - held_out$target_mean) / held_out$target_mean * 100
   }))
 
   data.frame(
@@ -229,4 +239,37 @@ loso_error <- function(data) {
     loso_n_sites = length(sites),
     stringsAsFactors = FALSE
   )
+}
+
+#' Mean of n consecutive complete months, at every possible start
+#'
+#' Works on a month index rather than on calendar years, so a run of months is
+#' allowed to cross the end of a year. Runs containing an incomplete month are
+#' dropped rather than averaged over the gap.
+#'
+#' @param monthly Data frame of monthly means with `Parameter`, `site`,
+#'   `month_index` and `monthly_mean`, already filtered to complete months.
+#' @param n Number of consecutive months to average.
+#' @param value_name Name to give the resulting column.
+#' @return A data frame with one row per pollutant, site and start month that
+#'   has all `n` months available.
+consecutive_means <- function(monthly, n, value_name = "mean_value") {
+  # Offset the series n times and keep only the starts that line up n deep
+  runs <- lapply(seq_len(n) - 1, function(offset) {
+    monthly |>
+      dplyr::mutate(start_index = month_index - offset) |>
+      dplyr::select(Parameter, site, start_index, monthly_mean)
+  })
+
+  dplyr::bind_rows(runs) |>
+    dplyr::group_by(Parameter, site, start_index) |>
+    dplyr::filter(dplyr::n() == n) |>
+    dplyr::summarise(value = mean(monthly_mean), .groups = "drop") |>
+    dplyr::mutate(
+      start_year = start_index %/% 12,
+      start_month = start_index %% 12 + 1
+    ) |>
+    stats::setNames(c(
+      "Parameter", "site", "start_index", value_name, "start_year", "start_month"
+    ))
 }

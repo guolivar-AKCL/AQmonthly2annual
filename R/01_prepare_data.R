@@ -5,7 +5,8 @@
 # the data completeness rules and writes tidy monthly and annual means for the
 # pollutants and period set in R/00_config.R.
 #
-# Outputs: output/monthly_means.csv, output/annual_means.csv
+# Outputs: output/monthly_means.csv, output/annual_means.csv,
+#          output/rolling_means.csv
 # ============================================================================
 
 source("R/00_config.R")
@@ -67,7 +68,10 @@ monthly <- hourly |>
     # Hours in the month, ignoring the one-hour daylight saving shifts
     possible_hours = days_in_month(make_date(year, month, 1)) * 24,
     completeness = n_hours / possible_hours,
-    complete = completeness >= MIN_MONTH_COMPLETENESS
+    complete = completeness >= MIN_MONTH_COMPLETENESS,
+    # Months numbered continuously from year 0, so that runs of months can
+    # cross the end of a calendar year
+    month_index = year * 12 + month - 1
   )
 
 # ============================================================================
@@ -90,15 +94,31 @@ annual <- monthly |>
   select(-n_months)
 
 # ============================================================================
+# Rolling twelve-month means
+#
+# The second target of the analysis. A rolling year is the twelve months
+# beginning with a given month, so a campaign that crosses the end of a
+# calendar year still has a twelve-month period it sits inside. The same
+# completeness rule applies: all twelve months must be complete.
+# ============================================================================
+
+rolling <- consecutive_means(
+  monthly |> filter(complete), 12,
+  value_name = "rolling_mean"
+) |>
+  filter(start_year >= START_YEAR, start_year <= END_YEAR)
+
+# ============================================================================
 # Save
 # ============================================================================
 
 write.csv(monthly, MONTHLY_MEANS, row.names = FALSE)
 write.csv(annual, ANNUAL_MEANS, row.names = FALSE)
+write.csv(rolling, ROLLING_MEANS, row.names = FALSE)
 
 cat(
   "01_prepare_data: ", nrow(monthly), " monthly means (",
   sum(monthly$complete), " complete), ", nrow(annual),
-  " complete site-years\n",
+  " complete site-years, ", nrow(rolling), " rolling years\n",
   sep = ""
 )
