@@ -105,19 +105,37 @@ for (site_name in sites) {
 
 par(mfrow = c(1, 1))
 
-
-
-
-
-
-
-
+# Now plot all sites together with regression line, confidence interval, and equation in subtitle
+slope <- coef(lm_model)["may_aug_avg"]
+r_squared <- summary(lm_model)$r.squared
+equation <- sprintf(
+  "[Annual] = %.3f * [May-Aug], R² = %.3f",
+  slope, r_squared
+)
+ggplot(no2_data, aes(x = may_aug_avg, y = annual_avg)) +
+  geom_point(color = "steelblue", alpha = 0.6) +
+  geom_smooth(
+    method = "lm",
+    formula = y ~ x + 0, se = TRUE,
+    color = "blue", fill = "lightblue"
+  ) +
+  labs(
+    title = paste("Relationship between May-August Average and Annual Average of", metric_label),
+    subtitle = equation,
+    x = paste("May-August Average", metric_label, "(µg/m³)"),
+    y = paste("Annual Average", metric_label, "(µg/m³)")
+  ) +
+    xlim(0, 100) +
+    ylim(0, 100) +
+  theme_minimal()
 
 
 ggplot(no2_data) +
-  geom_point(aes(x = jan_apr_avg, y = annual_avg, colour = "Jan - Apr")) +
+  # geom_point(aes(x = jan_apr_avg, y = annual_avg, colour = "Jan - Apr")) +
   geom_point(aes(x = may_aug_avg, y = annual_avg, colour = "May - Aug")) +
-  geom_point(aes(x = sep_dec_avg, y = annual_avg, colour = "Sep - Dec")) +
+  # geom_point(aes(x = sep_dec_avg, y = annual_avg, colour = "Sep - Dec")) +
+  xlim(0, 100) +
+  ylim(0, 100) +
   theme_minimal()
 ggsave(paste0("./output/",metric_label,"_may_aug_vs_annual.png", width = 8, height = 6)
 
