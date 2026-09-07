@@ -1,4 +1,4 @@
-# `doc/`
+# `docs/`
 
 * R Markdown files (Rmd) go in here
 * Any outputs (HTML, docx, PDF) and intermediaries (md) to be rendered into this folder too
