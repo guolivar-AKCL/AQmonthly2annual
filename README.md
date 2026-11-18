@@ -59,14 +59,14 @@ Rscript -e 'rmarkdown::render("docs/scaling_factors_methods.Rmd")'
 | File | What it does |
 |------|--------------|
 | [R/00_config.R](R/00_config.R) | Pollutants, period, longest window, completeness thresholds, paths. Change settings here. |
-| [R/functions.R](R/functions.R) | Shared functions: window enumeration, factor fitting, leave-one-out and leave-one-site-out error, and `get_timeseries_data()` for pulling fresh data from KiWIS. |
+| [R/functions.R](R/functions.R) | Shared functions: data preparation, window enumeration, factor fitting, leave-one-out and leave-one-site-out error. |
 | [R/01_prepare_data.R](R/01_prepare_data.R) | Resolves duplicate hours, adds the network-average series, applies completeness rules, writes monthly, annual and rolling twelve-month means. |
 | [R/02_scaling_factors.R](R/02_scaling_factors.R) | Fits site-specific and pooled factors for every window, against both the calendar-year and rolling twelve-month targets, and scores them. |
 | [R/03_figures.R](R/03_figures.R) | The five report figures. No analysis. |
 | [R/04_method_checks.R](R/04_method_checks.R) | Sensitivity analysis, estimator comparison and residual diagnostics for the methods document. Re-runs the pipeline under varied settings, so it reads the raw data and takes a couple of minutes. |
 
 Packages: **dplyr**, **lubridate**, **purrr**, **ggplot2**, **knitr**,
-**rmarkdown**; **rjson** and **curl** for the KiWIS fetch.
+**rmarkdown**.
 
 ## Method in brief
 
@@ -93,10 +93,9 @@ months, a factor needs at least five usable years.
 `data/aq_data_SOE2025.RData` holds `all.data.long` — ~12.1M hourly records
 (`Parameter`, `Value`, `date`, `site`), 2003-2024, ten sites from rural
 background (patumahoe) to city-centre kerbside (queen_st, customs_st), 18
-parameters. `data/all_stations_parameters.RData` holds the KiWIS time series
-catalogue used by `get_timeseries_data()`.
+parameters.
 
-Both are read-only and neither is committed - you need access to the official
+The raw data is read-only and is not committed — you need access to the official
 report data to run this.
 
 ## Outputs
